@@ -1,0 +1,7 @@
+paypal_inventory_listener.ipn_listener:
+  path: '/store/purchase-listener/paypal/ipn'
+  defaults:
+    _controller: '\Drupal\paypal_inventory_listener\Controller\PaypalIpnController::ipnListener'
+    _title: 'PayPal IPN Listener'
+  requirements:
+    _access: 'TRUE'

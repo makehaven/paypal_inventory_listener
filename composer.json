@@ -1,0 +1,6 @@
+{
+    "name": "makehaven/paypal_inventory_listener",
+    "type": "drupal-custom-module",
+    "description": "Handles PayPal IPN notifications to update inventory.",
+    "license": "GPL-2.0-or-later"
+}
