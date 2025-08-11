@@ -4,7 +4,7 @@ This Drupal module, **PayPal Inventory Listener**, handles PayPal Instant Paymen
 
 ## Getting Started
 
-These instructions will get you a copy of the project up and running on your local machine for development and testing purposes.
+These instructions will get you a copy of the project up and and running on your local machine for development and testing purposes.
 
 ### Prerequisites
 
@@ -23,9 +23,21 @@ Once enabled, the module provides a listener endpoint at `/store/purchase-listen
 
 When a PayPal payment with the status "Completed" is received, the module will:
 1.  Parse the incoming IPN data.
-2.  For each item in the transaction, it will create an "inventory_adjustment" entity.
+2.  For each item in the transaction, it will create an `inventory_adjustment` entity of the `material_inventory` entity type.
 3.  The quantity of the purchased item will be deducted from the inventory.
 4.  A log entry will be created for each inventory adjustment, including the payer's name and email, and the item purchased.
+
+### Entity and Field Information
+
+For the module to function correctly, an administrator must ensure that the following entity and fields are available.
+
+* **Entity Type**: `material_inventory`
+* **Bundle**: `inventory_adjustment`
+* **Fields**:
+    * `field_inventory_ref_material` (Entity Reference to the Material Node ID)
+    * `field_inventory_quantity_change` (Number, Integer)
+    * `field_inventory_change_reason` (Text)
+    * `field_inventory_change_memo` (Text)
 
 ### Local Testing
 
