@@ -5,3 +5,4 @@ core_version_requirement: ^10
 package: Custom
 dependencies:
   - eck
+  - material_inventory_totals
