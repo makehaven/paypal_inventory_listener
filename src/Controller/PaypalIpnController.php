@@ -67,6 +67,13 @@ class PaypalIpnController extends ControllerBase {
         $payer_email = $post_data['payer_email'] ?? '';
         $payer_name = trim(($post_data['first_name'] ?? '') . ' ' . ($post_data['last_name'] ?? ''));
 
+        // Handle single item transactions (e.g. "Buy Now" buttons) by normalizing to cart format.
+        if (!isset($post_data['item_number1']) && isset($post_data['item_number'])) {
+          $post_data['item_number1'] = $post_data['item_number'];
+          $post_data['quantity1'] = $post_data['quantity'] ?? 1;
+          $post_data['item_name1'] = $post_data['item_name'] ?? '';
+        }
+
         // Process each item in the cart.
         $item_count = 1;  // PayPal's cart items start with 'item_number1', 'item_number2', etc.
         while (isset($post_data['item_number' . $item_count])) {
