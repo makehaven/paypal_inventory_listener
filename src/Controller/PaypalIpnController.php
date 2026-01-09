@@ -66,6 +66,12 @@ class PaypalIpnController extends ControllerBase {
       if (isset($post_data['payment_status']) && $post_data['payment_status'] === 'Completed') {
         $payer_email = $post_data['payer_email'] ?? '';
         $payer_name = trim(($post_data['first_name'] ?? '') . ' ' . ($post_data['last_name'] ?? ''));
+        
+        // Parse custom field.
+        $custom_raw = $post_data['custom'] ?? '';
+        $custom_data = json_decode($custom_raw, TRUE);
+        $custom_uid = $custom_data['uid'] ?? $custom_raw; // Fallback to raw if not JSON
+        $transaction_type = $custom_data['type'] ?? 'unknown';
 
         // Handle single item transactions (e.g. "Buy Now" buttons) by normalizing to cart format.
         if (!isset($post_data['item_number1']) && isset($post_data['item_number'])) {
@@ -108,25 +114,36 @@ class PaypalIpnController extends ControllerBase {
             '@qty' => $quantity,
           ]);
 
+          // Determine quantity change.
+          // If this is a tab checkout, the inventory was already deducted when added to tab.
+          // So we record a 0 change here, just to log the sale and trigger reconciliation.
+          $qty_change = ($transaction_type === 'tab_checkout') ? 0 : -$quantity;
+
           // Create an inventory adjustment entity for each item.
           try {
+            // Construct memo with UID if present.
+            $memo = sprintf(
+              'Sold to %s (%s) - Item: %s',
+              $payer_name ?: 'Unknown buyer',
+              $payer_email ?: 'no-email',
+              $item_name ?: 'Unknown item'
+            );
+            if ($custom_uid) {
+              $memo = "[UID:$custom_uid] " . $memo;
+            }
+
             // Create the entity.
             $inventory_adjustment = $this->inventoryStorage->create([
               'type' => 'inventory_adjustment',
               'field_inventory_ref_material' => [
                 'target_id' => $material_id,
               ],
-              // Deduct the quantity from inventory.
+              // Deduct the quantity from inventory (or 0 if tab).
               'field_inventory_quantity_change' => [
-                'value' => -$quantity,
+                'value' => $qty_change,
               ],
               'field_inventory_change_reason' => 'sale',
-              'field_inventory_change_memo' => sprintf(
-                'Sold to %s (%s) - Item: %s',
-                $payer_name ?: 'Unknown buyer',
-                $payer_email ?: 'no-email',
-                $item_name ?: 'Unknown item'
-              ),
+              'field_inventory_change_memo' => $memo,
             ]);
 
             // Save the inventory adjustment.
