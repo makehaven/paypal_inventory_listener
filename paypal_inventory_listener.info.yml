@@ -2,7 +2,7 @@ name: 'PayPal Inventory Listener'
 type: module
 description: 'Handles PayPal IPN notifications to update inventory.'
 core_version_requirement: ^10 || ^11
-package: Custom
+package: Makerspace
 dependencies:
   - eck
   - material_inventory_totals
