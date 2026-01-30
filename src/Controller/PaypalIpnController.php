@@ -2,10 +2,12 @@
 
 namespace Drupal\paypal_inventory_listener\Controller;
 
+use Drupal\Component\Datetime\TimeInterface;
 use Drupal\Core\Controller\ControllerBase;
 use Drupal\Core\Entity\EntityStorageException;
 use Drupal\Core\Entity\EntityStorageInterface;
 use Drupal\Core\Entity\EntityTypeManagerInterface;
+use Drupal\Core\KeyValueStore\KeyValueFactoryInterface;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\DependencyInjection\ContainerInterface;
 use Symfony\Component\HttpFoundation\Request;
@@ -31,11 +33,27 @@ class PaypalIpnController extends ControllerBase {
   protected LoggerInterface $logger;
 
   /**
+   * Key/value factory.
+   *
+   * @var \Drupal\Core\KeyValueStore\KeyValueFactoryInterface
+   */
+  protected KeyValueFactoryInterface $keyValueFactory;
+
+  /**
+   * Time service.
+   *
+   * @var \Drupal\Component\Datetime\TimeInterface
+   */
+  protected TimeInterface $time;
+
+  /**
    * Constructs the controller.
    */
-  public function __construct(EntityTypeManagerInterface $entity_type_manager, LoggerInterface $logger) {
+  public function __construct(EntityTypeManagerInterface $entity_type_manager, LoggerInterface $logger, KeyValueFactoryInterface $key_value_factory, TimeInterface $time) {
     $this->inventoryStorage = $entity_type_manager->getStorage('material_inventory');
     $this->logger = $logger;
+    $this->keyValueFactory = $key_value_factory;
+    $this->time = $time;
   }
 
   /**
@@ -44,7 +62,9 @@ class PaypalIpnController extends ControllerBase {
   public static function create(ContainerInterface $container): self {
     return new static(
       $container->get('entity_type.manager'),
-      $container->get('logger.channel.paypal_inventory_listener')
+      $container->get('logger.channel.paypal_inventory_listener'),
+      $container->get('keyvalue'),
+      $container->get('datetime.time')
     );
   }
 
@@ -64,12 +84,64 @@ class PaypalIpnController extends ControllerBase {
     if ($is_local || $this->validateIpn($raw_post_data)) {
       // Process the IPN if the payment status is 'Completed'.
       if (isset($post_data['payment_status']) && $post_data['payment_status'] === 'Completed') {
+        $transaction_id = $post_data['txn_id'] ?? '';
+        if ($transaction_id === '') {
+          $this->logger->warning('Skipping PayPal IPN with missing txn_id.');
+          return new Response('', 200);
+        }
+
+        $accepted_types = ['cart', 'web_accept'];
+        $txn_type = $post_data['txn_type'] ?? '';
+        if ($txn_type !== '' && !in_array($txn_type, $accepted_types, TRUE)) {
+          $this->logger->warning('Skipping PayPal IPN with unsupported txn_type @type (txn_id @txn).', [
+            '@type' => $txn_type,
+            '@txn' => $transaction_id,
+          ]);
+          return new Response('', 200);
+        }
+
+        $currency = $post_data['mc_currency'] ?? '';
+        if ($currency !== '' && $currency !== 'USD') {
+          $this->logger->warning('Skipping PayPal IPN with unexpected currency @currency (txn_id @txn).', [
+            '@currency' => $currency,
+            '@txn' => $transaction_id,
+          ]);
+          return new Response('', 200);
+        }
+
+        $configured_business = $this->config('makerspace_material_store.settings')->get('paypal_business_id');
+        if (!empty($configured_business)) {
+          $receiver_email = $post_data['receiver_email'] ?? '';
+          $business_email = $post_data['business'] ?? '';
+          $receiver_id = $post_data['receiver_id'] ?? '';
+          $matches = in_array($configured_business, [$receiver_email, $business_email, $receiver_id], TRUE);
+          if (!$matches) {
+            $this->logger->warning('Skipping PayPal IPN with mismatched business receiver (txn_id @txn).', [
+              '@txn' => $transaction_id,
+            ]);
+            return new Response('', 200);
+          }
+        }
+
+        $store = $this->keyValueFactory->get('paypal_inventory_listener');
+        $ipn_track_id = $post_data['ipn_track_id'] ?? '';
+        if ($store->has('txn_id:' . $transaction_id) || ($ipn_track_id !== '' && $store->has('ipn_track_id:' . $ipn_track_id))) {
+          $this->logger->notice('Skipping duplicate PayPal IPN (txn_id @txn).', ['@txn' => $transaction_id]);
+          return new Response('', 200);
+        }
+
         $payer_email = $post_data['payer_email'] ?? '';
         $payer_name = trim(($post_data['first_name'] ?? '') . ' ' . ($post_data['last_name'] ?? ''));
         
         // Parse custom field.
         $custom_raw = $post_data['custom'] ?? '';
-        $custom_data = json_decode($custom_raw, TRUE);
+        $custom_data = [];
+        if ($custom_raw !== '') {
+          $decoded = json_decode($custom_raw, TRUE);
+          if (is_array($decoded)) {
+            $custom_data = $decoded;
+          }
+        }
         $custom_uid = $custom_data['uid'] ?? $custom_raw; // Fallback to raw if not JSON
         $transaction_type = $custom_data['type'] ?? 'unknown';
 
@@ -82,6 +154,7 @@ class PaypalIpnController extends ControllerBase {
 
         // Process each item in the cart.
         $item_count = 1;  // PayPal's cart items start with 'item_number1', 'item_number2', etc.
+        $created_adjustment = FALSE;
         while (isset($post_data['item_number' . $item_count])) {
           // Extract item data.
           $item_number_key = 'item_number' . $item_count;
@@ -148,6 +221,7 @@ class PaypalIpnController extends ControllerBase {
 
             // Save the inventory adjustment.
             $inventory_adjustment->save();
+            $created_adjustment = TRUE;
 
             $this->logger->info('Inventory adjustment saved for material @nid.', ['@nid' => $material_id]);
           } catch (EntityStorageException $e) {
@@ -164,6 +238,17 @@ class PaypalIpnController extends ControllerBase {
 
           // Move to the next item in the cart.
           $item_count++;
+        }
+
+        if ($created_adjustment) {
+          $store->set('txn_id:' . $transaction_id, $this->time->getRequestTime());
+          if ($ipn_track_id !== '') {
+            $store->set('ipn_track_id:' . $ipn_track_id, $this->time->getRequestTime());
+          }
+        } else {
+          $this->logger->warning('PayPal IPN did not create inventory adjustments (txn_id @txn).', [
+            '@txn' => $transaction_id,
+          ]);
         }
       } else {
         $this->logger->error('Payment status is not "Completed".');
@@ -187,9 +272,22 @@ class PaypalIpnController extends ControllerBase {
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_POST, true);
     curl_setopt($ch, CURLOPT_POSTFIELDS, $request_body);
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 5);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 15);
     $response = curl_exec($ch);
+    if ($response === false) {
+      $error = curl_error($ch);
+      curl_close($ch);
+      $this->logger->error('PayPal IPN validation request failed: @error', ['@error' => $error]);
+      return FALSE;
+    }
     curl_close($ch);
 
-    return strcmp($response, "VERIFIED") == 0;
+    $response = trim($response);
+    if ($response !== 'VERIFIED') {
+      $this->logger->warning('PayPal IPN validation returned @response.', ['@response' => $response]);
+    }
+    return strcmp($response, 'VERIFIED') === 0;
   }
+
 }

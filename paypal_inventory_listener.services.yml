@@ -1,0 +1,4 @@
+services:
+  logger.channel.paypal_inventory_listener:
+    parent: logger.channel_base
+    arguments: ['paypal_inventory_listener']
